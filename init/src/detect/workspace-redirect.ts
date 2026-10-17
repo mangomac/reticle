@@ -18,6 +18,7 @@ import {
   PACKAGE_JSON,
   workspacePackageDirs,
 } from './workspace-apps.js';
+import { devScriptBody } from './dev-script.js';
 import { projectIdOf, RETICLE_CONFIG_FILE } from './existing-config.js';
 import { chooseWorkspaceApp, withoutTrailingSlashes } from './declared/app-choice.js';
 import type { InitIo, InitOptions, InitResult } from '@/run-types.js';
@@ -58,13 +59,17 @@ function inHome(io: InitIo): boolean {
 }
 
 /** Print the candidates as commands to paste, and stop: the choice is the person's. */
-function listApps(io: InitIo, header: string, apps: readonly string[]): InitResult {
-  io.print(header);
+function printAppCommands(io: InitIo, apps: readonly string[]): void {
   for (const a of apps) {
     const displayed = displayedWorkspaceAppCommand(a, process.platform);
     if (displayed.label !== undefined) io.print(`  ${displayed.label}`);
     io.print(`  ${displayed.command}`);
   }
+}
+
+function listApps(io: InitIo, header: string, apps: readonly string[]): InitResult {
+  io.print(header);
+  printAppCommands(io, apps);
   return { ok: false, applied: 0, manual: apps.length, listedAppsBelow: true };
 }
 
@@ -165,21 +170,18 @@ export function redirectToWorkspaceApp(
   const pointed = appNamedByRootConfig(io);
   if (pointed !== undefined) return enterApp(options, io, pointed, ROOT_CONFIG_LEAD, runInit);
 
-  // A plain page with a manifest is the app too: it renders through its own index.html, and the
-  // dev script that serves it lives in its package.json. Discovery preferred a nested copy — a
+  // A plain page with a manifest that has a dev script is the app too: it renders through its own
+  // index.html, and the dev script that serves it lives in its package.json. A manifest that holds
+  // only tooling is not enough: the real app may sit in a nested folder, so discovery still runs. Discovery preferred a nested copy — a
   // `backup/` folder holding another app — over the folder the person is standing in, and
   // `init --dry-run` named the copy as the target. A root pointer stored by an earlier `--app` run
   // is read first, above. Past that, the nested app is something to LIST, never to choose; the
   // root is wired by the normal plan after this null.
-  if (io.exists(STATIC_PAGE) && io.exists(PACKAGE_JSON)) {
+  if (io.exists(STATIC_PAGE) && io.exists(PACKAGE_JSON) && devScriptBody(pkg) !== undefined) {
     const nested = findWorkspaceApps(io);
     if (0 < nested.length) {
       io.print(WIRE_ANOTHER);
-      for (const a of nested) {
-        const displayed = displayedWorkspaceAppCommand(a, process.platform);
-        if (displayed.label !== undefined) io.print(`  ${displayed.label}`);
-        io.print(`  ${displayed.command}`);
-      }
+      printAppCommands(io, nested);
     }
     return null;
   }

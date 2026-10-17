@@ -172,6 +172,26 @@ describe('redirectToWorkspaceApp — a page with a manifest at the root', () => 
     ]);
   });
 
+  it('still redirects to the nested app when the root manifest has no dev script', () => {
+    const lines: string[] = [];
+    const io = pageAtRootIo(lines, {
+      'package.json': JSON.stringify({ name: 'tooling', devDependencies: { prettier: '^3' } }),
+    });
+    const entered: string[] = [];
+
+    redirectToWorkspaceApp(
+      OPTIONS,
+      io,
+      JSON.parse(io.readFile('package.json') ?? '{}'),
+      (options) => {
+        entered.push(options.cwd);
+        return { ok: true, applied: 0, manual: 0 };
+      },
+    );
+
+    expect(entered).toEqual(['/project/backup']);
+  });
+
   it('keeps the app that a stored root pointer names', () => {
     const lines: string[] = [];
     const io = pageAtRootIo(lines, {

@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SILENT_HOST } from '../host.js';
 import type { InitIo, InitOptions } from '../run-types.js';
@@ -189,7 +190,7 @@ describe('redirectToWorkspaceApp — a page with a manifest at the root', () => 
       },
     );
 
-    expect(entered).toEqual(['/project/backup']);
+    expect(entered).toEqual([join('/project', 'backup')]);
   });
 
   it('keeps the app that a stored root pointer names', () => {
@@ -216,6 +217,6 @@ describe('redirectToWorkspaceApp — a page with a manifest at the root', () => 
       },
     );
 
-    expect(entered).toEqual(['/project/apps/web']);
+    expect(entered).toEqual([join('/project', 'apps', 'web')]);
   });
 });

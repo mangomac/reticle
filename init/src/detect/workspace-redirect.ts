@@ -172,11 +172,12 @@ export function redirectToWorkspaceApp(
 
   // A plain page with a manifest that has a dev script is the app too: it renders through its own
   // index.html, and the dev script that serves it lives in its package.json. A manifest that holds
-  // only tooling is not enough: the real app may sit in a nested folder, so discovery still runs. Discovery preferred a nested copy — a
-  // `backup/` folder holding another app — over the folder the person is standing in, and
-  // `init --dry-run` named the copy as the target. A root pointer stored by an earlier `--app` run
-  // is read first, above. Past that, the nested app is something to LIST, never to choose; the
-  // root is wired by the normal plan after this null.
+  // only tooling is not enough: the real app may sit in a nested folder, so discovery still runs.
+  //
+  // Discovery preferred a nested copy - a `backup/` folder holding another app - over the folder the
+  // person is standing in, and `init --dry-run` named the copy as the target. A root pointer stored
+  // by an earlier `--app` run is read first, above. Past that, the nested app is something to LIST,
+  // never to choose; the root is wired by the normal plan after this null.
   if (io.exists(STATIC_PAGE) && io.exists(PACKAGE_JSON) && devScriptBody(pkg) !== undefined) {
     const nested = findWorkspaceApps(io);
     if (0 < nested.length) {
@@ -216,11 +217,7 @@ export function redirectToWorkspaceApp(
     io.print(0 === wired.length ? AMBIGUOUS_HEADER : `${ALREADY_WIRED} ${wired.join(', ')}.`);
     const rest = apps.filter((a) => !wired.includes(a));
     if (0 < wired.length && 0 < rest.length) io.print(WIRE_ANOTHER);
-    for (const a of 0 === wired.length ? apps : rest) {
-      const displayed = displayedWorkspaceAppCommand(a, process.platform);
-      if (displayed.label !== undefined) io.print(`  ${displayed.label}`);
-      io.print(`  ${displayed.command}`);
-    }
+    printAppCommands(io, 0 === wired.length ? apps : rest);
     return 0 === wired.length
       ? { ok: false, applied: 0, manual: apps.length }
       : { ok: true, applied: 0, manual: 0 };

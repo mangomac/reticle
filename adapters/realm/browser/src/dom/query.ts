@@ -504,10 +504,17 @@ function embeddedRootsUnder(root: HTMLElement): HTMLElement[] {
  * with it.
  */
 function findCandidates(query: ElementQuery): { candidates: HTMLElement[]; scopeMissing: boolean } {
-  const { container, scopeMissing } = resolveContainer(query.scope);
+  const resolved = resolveContainer(query.scope);
   // A given-but-missing scope searches NOTHING - never the whole page. The empty result plus the
   // scopeMissing flag is what keeps "gone scope" distinct from "absent element".
-  if (null === container) return { candidates: [], scopeMissing: true };
+  if (null === resolved.container) return { candidates: [], scopeMissing: true };
+  // The default root is the whole DOCUMENT minus <head>, not just <body>: a node appended straight
+  // to `document.documentElement` (an overlay mounted outside the body, a hardened-frame remnant)
+  // renders on the page, and rooting the search at `document.body` reported it absent with no hint
+  // (#1781). `<head>` is never page content - its text (<title>) and payloads must not match, so
+  // head descendants are excluded at the one collection point below.
+  const container = query.scope === undefined ? document.documentElement : resolved.container;
+  const scopeMissing = resolved.scopeMissing;
   // `self: true` asks for the container ITSELF, which every other path excludes by construction.
   // A layout element with no role, name, testid or own text is unreachable by any semantic locator,
   // and it is routinely the element carrying the handler - "click the empty space in this row" is a
@@ -538,6 +545,8 @@ function findCandidates(query: ElementQuery): { candidates: HTMLElement[]; scope
   const collect = (els: HTMLElement[]): void => {
     for (const el of els) {
       if (seen.has(el)) continue; // reachable from both host and root - count once
+      // `<head>` content is reachable from the document root but is not page content (#1781).
+      if (query.scope === undefined && el.closest('head') !== null) continue;
       // Reticle's OWN UI is not part of the app under test. `snapshot` has always excluded it; query
       // did not, so the presenter panel and the annotator answered `by: role` like app controls -
       // on a production-sized dashboard, 7 of the 40 buttons an agent could see were ours

@@ -495,6 +495,16 @@ function embeddedRootsUnder(root: HTMLElement): HTMLElement[] {
  * Correctness wins until there is a measurement saying the walk actually matters. The allocation is
  * avoided (iterate the live NodeList rather than copying it); the traversal itself stays.
  */
+/** The root a whole-page query searches and a zero-match hint describes: scope, or DOCUMENT (#1781). */
+function searchRoot(query: ElementQuery): HTMLElement | null {
+  if (query.scope !== undefined) return resolveContainer(query.scope).container;
+  return document.documentElement; // not body: nodes appended to documentElement render too
+}
+/** <head> payloads (title, style) are not page content to a whole-page search or hint (#1781). */
+function pageContent(el: Element, scope: string | undefined): boolean {
+  return scope !== undefined || null === el.closest('head');
+}
+
 /**
  * Run the query against the light DOM AND every open shadow root beneath the scope.
  *
@@ -508,9 +518,7 @@ function findCandidates(query: ElementQuery): { candidates: HTMLElement[]; scope
   // A given-but-missing scope searches NOTHING - never the whole page. The empty result plus the
   // scopeMissing flag is what keeps "gone scope" distinct from "absent element".
   if (null === scoped) return { candidates: [], scopeMissing: true };
-  // The default root is the whole DOCUMENT minus <head>, not just <body>: a node appended straight
-  // to `document.documentElement` still renders on the page, and rooting the search at
-  // `document.body` reported it absent with no hint (#1781).
+  // The default root is the whole DOCUMENT minus <head>, not just <body> (#1781 - see searchRoot).
   const container = query.scope === undefined ? document.documentElement : scoped;
   // `self: true` asks for the container ITSELF, which every other path excludes by construction.
   // A layout element with no role, name, testid or own text is unreachable by any semantic locator,
@@ -542,8 +550,7 @@ function findCandidates(query: ElementQuery): { candidates: HTMLElement[]; scope
   const collect = (els: HTMLElement[]): void => {
     for (const el of els) {
       if (seen.has(el)) continue; // reachable from both host and root - count once
-      // `<head>` content (title, style payloads) is not page content and must not match (#1781).
-      if (query.scope === undefined && el.closest('head') !== null) continue;
+      if (!pageContent(el, query.scope)) continue;
       // Reticle's OWN UI is not part of the app under test. `snapshot` has always excluded it; query
       // did not, so the presenter panel and the annotator answered `by: role` like app controls -
       // on a production-sized dashboard, 7 of the 40 buttons an agent could see were ours
@@ -627,10 +634,9 @@ export function matchQuery(
   // so all that is left is a net that converts real faults into false negatives.
   const found = findCandidates(query);
   const scopeMissing = found.scopeMissing;
-  // A phrase a reader sees whole matches whole: with no element whose own text holds it, the
-  // tightest element whose visible text does is the match — the same one the splitText hint names.
+  // A phrase a reader sees whole matches whole: the tightest element whose visible text does.
   const wanted = wholePhrase && textOnly(query) ? wantedTextOf(query) : undefined;
-  const scope = 0 === found.candidates.length ? resolveContainer(query.scope).container : null;
+  const scope = 0 === found.candidates.length ? searchRoot(query) : null;
   const owner =
     null === scope || wanted === undefined ? undefined : splitTextOwner(scope, wanted, query);
   const elements: HTMLElement[] = owner === undefined ? found.candidates : [owner];
@@ -693,7 +699,7 @@ function resolveLabelledBy(el: Element): string | undefined {
 function buildPresentRegions(query: ElementQuery): PresentRegion[] {
   // For the diagnostic hint we WANT the page's orientation even when the scope is gone, so fall back
   // to the body here (the match path above already reported scopeMissing, so this can't mask it).
-  const container = resolveContainer(query.scope).container ?? document.body;
+  const container = searchRoot(query) ?? document.body;
   const regions: PresentRegion[] = [];
   const CONTAINER_ROLES = [
     'list',
@@ -771,12 +777,11 @@ function splitTextOwner(
 ): HTMLElement | undefined {
   let best: HTMLElement | undefined;
   let bestDepth = -1;
-  // One memo for the whole pass: the visibility walk is O(depth) per element and every sibling
-  // shares its ancestors. Scoped to this synchronous pass, never module-level - see the shadow-root
-  // note above for why a cache that outlives one pass is unsound here.
+  // One memo for this pass only - see the shadow-root note above for why a longer-lived one is unsound.
   const memo = new Map<Element, boolean>();
   for (const el of elementsUnder(container)) {
     if (isIgnored(el)) continue; // never point an agent at Reticle's own UI
+    if (!pageContent(el, query.scope)) continue; // <title> text must not anchor a split match
     // The query's own case rule: a case-exact check that missed only on case is not "split".
     if (!textMatches(visibleTextOf(el, memo), query, wanted)) continue;
     let depth = 0;
@@ -790,12 +795,14 @@ function splitTextOwner(
 }
 
 /** The text as the page shows it, when it differs from `wanted` only by case. */
-function caseOnlyMatch(container: HTMLElement, wanted: string): string | undefined {
+function caseOnlyMatch(container: HTMLElement, wanted: string, scope?: string): string | undefined {
   const target = normaliseVisibleText(wanted).toLowerCase();
   if (0 === target.length) return undefined;
   const memo = new Map<Element, boolean>();
   for (const el of elementsUnder(container)) {
     if (isIgnored(el)) continue;
+    if (!pageContent(el, scope)) continue; // <title> text is not a page-shown casing
+
     const text = normaliseVisibleText(visibleTextOf(el, memo));
     const at = text.toLowerCase().indexOf(target);
     if (-1 !== at) return text.slice(at, at + target.length);
@@ -910,12 +917,11 @@ function buildEmptyHint(
   state?: ElementState,
   diagnose: boolean = true,
 ): QueryEmptyHint {
-  const container = resolveContainer(query.scope).container ?? document.body;
+  const container = searchRoot(query) ?? document.body;
   const all = container.querySelectorAll(testIdSelector());
   const present: string[] = [];
-  // Counted past the cap rather than stopping at it. The list is capped so the hint stays a hint;
-  // the COUNT is what stops a capped list being read as the whole page. `all` is already in hand,
-  // so the walk costs nothing the query had not already paid for.
+  // Counted past the cap rather than stopping at it: the COUNT stops a capped list being read as
+  // the whole page, and `all` is already in hand, so the walk costs nothing.
   const seen = new Set<string>();
   for (const el of Array.from(all)) {
     if (isIgnored(el)) continue; // the "what IS here" hint must not advertise Reticle's own UI either
@@ -924,22 +930,19 @@ function buildEmptyHint(
     seen.add(id);
     if (present.length < MAX_PRESENT_TESTIDS) present.push(id);
   }
-  // DECLARED, not observed: see declaredTestids. Every present testid is also an observed one, so
-  // the merged list would make this flag true for any page that has a testid at all.
+  // DECLARED, not observed: see declaredTestids - merging them would make this true on any page.
   const registered = declaredTestids();
   const knownEmptyState = present.some((id) => registered.includes(id));
   const route = pageRoute(false);
   const hint: QueryEmptyHint = {
     route,
     presentTestids: present,
-    // Present only when the cap cut something: the same convention as the query result's own
-    // `total`/`truncated` pair, and for the same reason — a field on every result carries nothing.
+    // Present only when the cap cut something - same convention as total/truncated.
     ...(seen.size > present.length ? { presentTestidsTotal: seen.size } : {}),
     presentRegions: buildPresentRegions(query),
     knownEmptyState,
   };
-  // Only for a text search, and only when the string IS here — otherwise this is an ordinary miss
-  // and the extra clause would lengthen every failure to say nothing.
+  // Only for a text search when the string IS here - else the clause lengthens every miss for nothing.
   const wanted = wantedTextOf(query);
   if (wanted !== undefined) {
     const owner = splitTextOwner(container, wanted, query);
@@ -948,14 +951,13 @@ function buildEmptyHint(
       const selector = stableSelectorFor(owner);
       hint.splitText = selector === undefined ? described : { ...described, selector };
     } else if (true === query.matchCase) {
-      const shown = caseOnlyMatch(container, wanted);
+      const shown = caseOnlyMatch(container, wanted, query.scope);
       if (shown !== undefined) hint.caseMiss = shown;
     }
   }
-  // A text or name match hidden only by aria-hidden — drawn on screen but excluded from the
-  // accessible tree. Only for visibility-related misses: a `state: 'checked'` miss on a visible
-  // element should blame the state, not an unrelated aria-hidden twin (#1070). Gated on `diagnose`
-  // because the scan walks every element in the container and interim poll checks never read it.
+  // A text or name match hidden only by aria-hidden - on screen but out of the accessible tree.
+  // Only for visibility-related misses (#1070); gated on `diagnose` because the scan walks every
+  // element in the container and interim poll checks never read it.
   if (
     diagnose &&
     wanted !== undefined &&

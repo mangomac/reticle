@@ -13,8 +13,9 @@ import {
   type QueryResult,
   TRANSPORT_LIMITS,
 } from '@reticlehq/core';
-import { isActionTarget, isElement, isFrame, isInput, isSelect, isTextArea } from './realm.js';
+import { isElement, isFrame, isInput, isSelect, isTextArea } from './realm.js';
 import { capturedRootOf } from './shadow-registry.js';
+import { pageContent, resolveContainer, searchRoot } from './search-root.js';
 import {
   getAccessibleName,
   getRole,
@@ -29,7 +30,6 @@ import { dialogCovering, isIgnored, isReticleOverlay, isWordsIgnored } from './d
 import { isSensitiveKey } from '@/security/serialization.js';
 import { declaredTestids } from '@/registry/capabilities.js';
 import { identifyComponent } from '@/registry/stores/adapters.js';
-import { refs } from './addressing/refs.js';
 import { getTestIdAttr, readTestId, testIdSelector } from './addressing/testid-attr.js';
 import { stableSelectorFor } from './stable-selector.js';
 import {
@@ -152,33 +152,6 @@ function semanticNameTarget(el: Element): boolean {
     el.hasAttribute('aria-label') ||
     el.hasAttribute('aria-labelledby')
   );
-}
-
-/**
- * Resolve a scope to its container. A container of `null` means a scope was GIVEN but resolved to
- * nothing (unmounted, or a selector that matches no element) - the caller must NOT fall back to the
- * whole page, or a scoped query silently widens into a phantom match. `scope === undefined` (no scope)
- * legitimately searches the body.
- */
-function resolveContainer(scope: string | undefined): {
-  container: HTMLElement | null;
-  scopeMissing: boolean;
-} {
-  if (scope === undefined) return { container: document.body, scopeMissing: false };
-  // An SVG element is a scope too. `look` hands out refs for SVG links, and the action layer drives
-  // them, so refusing one here reported a scope the page plainly has as MISSING - a floor plan whose
-  // rooms are `<a href>` inside an `<svg>` could be clicked but never scoped to (#1122). The locators
-  // below read only what Element has (attributes, children, text), which is also why `elementsUnder`
-  // already walks SVG descendants.
-  const byRef = refs.resolve(scope);
-  if (isActionTarget(byRef)) return { container: byRef, scopeMissing: false };
-  try {
-    const found = document.querySelector(scope);
-    if (isActionTarget(found)) return { container: found, scopeMissing: false };
-  } catch {
-    // invalid selector - treat as a missing scope, never a whole-page search
-  }
-  return { container: null, scopeMissing: true };
 }
 
 /**
@@ -495,16 +468,6 @@ function embeddedRootsUnder(root: HTMLElement): HTMLElement[] {
  * Correctness wins until there is a measurement saying the walk actually matters. The allocation is
  * avoided (iterate the live NodeList rather than copying it); the traversal itself stays.
  */
-/** The root a whole-page query searches and a zero-match hint describes: scope, or DOCUMENT (#1781). */
-function searchRoot(query: ElementQuery): HTMLElement | null {
-  if (query.scope !== undefined) return resolveContainer(query.scope).container;
-  return document.documentElement; // not body: nodes appended to documentElement render too
-}
-/** <head> payloads (title, style) are not page content to a whole-page search or hint (#1781). */
-function pageContent(el: Element, scope: string | undefined): boolean {
-  return scope !== undefined || null === el.closest('head');
-}
-
 /**
  * Run the query against the light DOM AND every open shadow root beneath the scope.
  *
@@ -634,7 +597,8 @@ export function matchQuery(
   // so all that is left is a net that converts real faults into false negatives.
   const found = findCandidates(query);
   const scopeMissing = found.scopeMissing;
-  // A phrase a reader sees whole matches whole: the tightest element whose visible text does.
+  // A phrase a reader sees whole matches whole: with no element whose own text holds it, the
+  // tightest element whose visible text does is the match — the same one the splitText hint names.
   const wanted = wholePhrase && textOnly(query) ? wantedTextOf(query) : undefined;
   const scope = 0 === found.candidates.length ? searchRoot(query) : null;
   const owner =
@@ -777,7 +741,9 @@ function splitTextOwner(
 ): HTMLElement | undefined {
   let best: HTMLElement | undefined;
   let bestDepth = -1;
-  // One memo for this pass only - see the shadow-root note above for why a longer-lived one is unsound.
+  // One memo for the whole pass: the visibility walk is O(depth) per element and every sibling
+  // shares its ancestors. Scoped to this synchronous pass, never module-level - see the shadow-root
+  // note above for why a cache that outlives one pass is unsound here.
   const memo = new Map<Element, boolean>();
   for (const el of elementsUnder(container)) {
     if (isIgnored(el)) continue; // never point an agent at Reticle's own UI
@@ -802,7 +768,6 @@ function caseOnlyMatch(container: HTMLElement, wanted: string, scope?: string): 
   for (const el of elementsUnder(container)) {
     if (isIgnored(el)) continue;
     if (!pageContent(el, scope)) continue; // <title> text is not a page-shown casing
-
     const text = normaliseVisibleText(visibleTextOf(el, memo));
     const at = text.toLowerCase().indexOf(target);
     if (-1 !== at) return text.slice(at, at + target.length);
@@ -920,8 +885,9 @@ function buildEmptyHint(
   const container = searchRoot(query) ?? document.body;
   const all = container.querySelectorAll(testIdSelector());
   const present: string[] = [];
-  // Counted past the cap rather than stopping at it: the COUNT stops a capped list being read as
-  // the whole page, and `all` is already in hand, so the walk costs nothing.
+  // Counted past the cap rather than stopping at it. The list is capped so the hint stays a hint;
+  // the COUNT is what stops a capped list being read as the whole page. `all` is already in hand,
+  // so the walk costs nothing the query had not already paid for.
   const seen = new Set<string>();
   for (const el of Array.from(all)) {
     if (isIgnored(el)) continue; // the "what IS here" hint must not advertise Reticle's own UI either
@@ -930,19 +896,22 @@ function buildEmptyHint(
     seen.add(id);
     if (present.length < MAX_PRESENT_TESTIDS) present.push(id);
   }
-  // DECLARED, not observed: see declaredTestids - merging them would make this true on any page.
+  // DECLARED, not observed: see declaredTestids. Every present testid is also an observed one, so
+  // the merged list would make this flag true for any page that has a testid at all.
   const registered = declaredTestids();
   const knownEmptyState = present.some((id) => registered.includes(id));
   const route = pageRoute(false);
   const hint: QueryEmptyHint = {
     route,
     presentTestids: present,
-    // Present only when the cap cut something - same convention as total/truncated.
+    // Present only when the cap cut something: the same convention as the query result's own
+    // `total`/`truncated` pair, and for the same reason — a field on every result carries nothing.
     ...(seen.size > present.length ? { presentTestidsTotal: seen.size } : {}),
     presentRegions: buildPresentRegions(query),
     knownEmptyState,
   };
-  // Only for a text search when the string IS here - else the clause lengthens every miss for nothing.
+  // Only for a text search, and only when the string IS here — otherwise this is an ordinary miss
+  // and the extra clause would lengthen every failure to say nothing.
   const wanted = wantedTextOf(query);
   if (wanted !== undefined) {
     const owner = splitTextOwner(container, wanted, query);
@@ -955,9 +924,10 @@ function buildEmptyHint(
       if (shown !== undefined) hint.caseMiss = shown;
     }
   }
-  // A text or name match hidden only by aria-hidden - on screen but out of the accessible tree.
-  // Only for visibility-related misses (#1070); gated on `diagnose` because the scan walks every
-  // element in the container and interim poll checks never read it.
+  // A text or name match hidden only by aria-hidden — drawn on screen but excluded from the
+  // accessible tree. Only for visibility-related misses: a `state: 'checked'` miss on a visible
+  // element should blame the state, not an unrelated aria-hidden twin (#1070). Gated on `diagnose`
+  // because the scan walks every element in the container and interim poll checks never read it.
   if (
     diagnose &&
     wanted !== undefined &&
